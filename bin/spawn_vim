@@ -1,0 +1,10 @@
+#! /usr/bin/env ruby
+require 'vimrunner'
+dir = File.expand_path('..', __dir__)
+plugin = 'plugin/vim-elixir-fold.vim'
+vim = Vimrunner.start_gvim
+vim.add_plugin(dir, plugin)
+vim.edit! "test.ex"
+vim.normal ':set ft=elixir<CR>'
+#vim.normal ':source test.vim'
+gets

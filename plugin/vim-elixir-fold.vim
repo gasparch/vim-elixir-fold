@@ -1,147 +1,280 @@
 " =============================================================================
 " Descriptions:  Provide a function providing folding information for elixir
-"           files.
-" Maintainer:        Vincent B (twinside@gmail.com)
+"           files. Part of vim-elixir-ide matapackage.
+" Maintainer:        Gaspar Chilingarov (gasparch+elixir@gmail.com)
 " Warning: Assume the presence of type signatures on top of your functions to
 "          work well.
 " Usage:   drop in ~/vimfiles/plugin or ~/.vim/plugin
-" Version:     1.2
-" Changelog: - 1.2 : Reacting to file type instead of file extension.
-"            - 1.1 : Adding foldtext to bet more information.
-"            - 1.0 : initial version
+" Version:     1,0
+" Changelog: - 1.0 : initial version
 " =============================================================================
 if exists("g:__ELIXIRFOLD_VIM__")
     finish
 endif
 let g:__ELIXIRFOLD_VIM__ = 1
 
-" Top level bigdefs
-fun! s:ElixirFoldMaster( line ) "{{{
-    return a:line =~# '^\s*defp\?'
-"      \ || a:line =~# '^type\s'
-"      \ || a:line =~# '^newdata\s'
-"      \ || a:line =~# '^class\s'
-"      \ || a:line =~# '^instance\s'
-"      \ || a:line =~  '^[^:]\+\s*::'
-endfunction "}}}
+"set debug=msg,throw
+let s:__DEBUG = 0
 
-" Top Level one line shooters.
-fun! s:ElixirSnipGlobal(line) "{{{
-    return a:line =~# '^module'
-      \ || a:line =~# '^import'
-      \ || a:line =~# '^infix[lr]\s'
-endfunction "}}}
+let s:FOLD_TOGETHER_EXCEPTIONS = 'handle_\%(call\|cast\|info\)'
 
 let s:DEF_PATTERN = '\%(^\s*\)\@<=defp\?\%(:\)\@!\s\+\([^[:space:];#<,()\[\]]\+\)'
-let s:DEF_KW_PATTERN = '\%(^\s*\)\@<=defp\?'
-let s:END_PATTERN = '\v(^\s*)@<=end'
 let s:SPEC_KW_PATTERN = '\%(^\s*\)\@<=@spec'
+let s:DEF_ONE_LINER_PATTERN = '\%(^\s*\)\@<=defp\?\%(:\)\@!\s\+\([^[:space:];#<,()\[\]]\+\)\%(.*\),\s*do:\s\+'
+let s:DEF_MULTI_LINE_PATTERN = '\%(^\s*\)\@<=defp\?\%(:\)\@!\s\+\([^[:space:];#<,()\[\]]\+\)\s*\%(([^)]*).*\)\?\<do\>\s*\%(#.*\)\?$'
 
-function! s:ElixirGetSyntaxType(line, col)
-  if a:col == -1 " skip synID lookup for not found match
-    return 1
-  end
-"  call synID(a:line, a:col, 1)
-"  syntax sync minlines=20 maxlines=150
+let s:LINE_PARSE = '\v^(\s*)(#|\w+)'
 
-  return synIDattr(synID(a:line, a:col, 0), "name")
-endfunction
+let s:GET_IN_SYNC_PATTERN = '^\s*\%(test\|describe\|defp\?\)\>'
 
-"let s:def_positions = []
+let s:NON_INITIALIZED = -65536
+let s:MAX_LOOK_AHEAD = 50
+
+" TODO: make configurable
+let s:POWERLINE_SPACE_SYMBOL = 'Ξ'
+
+fun! s:ResetBufferCache(lineNum, foldLevel) "{{{
+  "echom "called ResetBufferCache"
+  let b:elixirFoldLine = a:lineNum - 1
+  let b:elixirStatus = []
+  let b:elixirBaseFoldLevel = a:foldLevel
+  let b:elixirLastContext = {'name': ''}
+endfunction "}}}
+
+fun! s:ResetPositionCache() "{{{
+"  echom "called ResetPositionCache"
+  " initialize fold decision cache in current buffer
+  let b:elixirFoldCache = map(range(1, line('$')+1), s:NON_INITIALIZED)
+  let b:elixirFoldCacheTick = s:NON_INITIALIZED
+endfunction "}}}
+
+fun! s:InitBufferCache(lineNum) "{{{
+  if !exists("b:elixirFoldLine") || a:lineNum == 1
+    let z = s:ResetBufferCache(a:lineNum, 0)
+  endif
+endfunction "}}}
 
 " The real folding function
 fun! ElixirFold( lineNum ) "{{{
+  " on startup fold-expr can be called twice
+  " cache first run results
+  if b:elixirFoldCacheTick == b:changedtick
+    let cached_value = b:elixirFoldCache[a:lineNum]
+    if cached_value != s:NON_INITIALIZED
+      return cached_value
+    endif
+  endif
+
+  call s:InitBufferCache(a:lineNum)
+
+  let inSequence = (b:elixirFoldLine == a:lineNum - 1)
+
+  if inSequence
+    let result = s:ElixirFoldProcessLine(a:lineNum, b:elixirBaseFoldLevel)
+  else
+    let backtrack = s:elixirNeedMoreBacktrack(a:lineNum)
+
+"    echom "working on line" . a:lineNum . " backtrack " . backtrack
+
+    if backtrack
+      let b:elixirFoldLine = -999
+      return -1
+    else
+      " we found line with def/etc
+      let initialFoldLevel = foldlevel(a:lineNum) - 1
+      call s:ResetBufferCache(a:lineNum, initialFoldLevel)
+      call s:ResetPositionCache()
+
+      let result = s:ElixirFoldProcessLine(a:lineNum, b:elixirBaseFoldLevel)
+      let inSequence = 1
+    endif
+  endif
+
+"  echom "working on line" . a:lineNum . " in seq " . inSequence . " result " . result
+"  echom getline(a:lineNum)
+
+  if inSequence
+    let b:elixirFoldLine = a:lineNum
+
+    let b:elixirFoldCache[a:lineNum] = result
+    let b:elixirFoldCacheTick = b:changedtick
+  else
+    let b:elixirFoldLine = -999
+  endif
+
+"  if !inSequence
+"    let line = getline(a:lineNum)
+"    let bf = bufnr('%')
+"    echom a:lineNum . " " . result . " " . type(result) . " " . bf . " " . line
+"  endif
+
+  return result
+endfunction "}}}
+
+fun! s:elixirFoldUnknownLevel() "{{{
+  if !empty(b:elixirStatus)
+    " we do not want to decide which level we are, 
+    " but we want to keep current level
+    return '='
+  else
+    " look around and decide some fold level
+    return -1
+  endif
+endfunction "}}}
+
+fun! s:elixirNeedMoreBacktrack(lineNum) "{{{
+  let foldLevel = foldlevel(a:lineNum)
+  let line = getline(a:lineNum)
+
+"  echom "backtrack decision " . a:lineNum . " re=" . (match(line, s:GET_IN_SYNC_PATTERN)) . " flvl=" . (foldLevel) . " -> " . line 
+
+  " backtrack until we find line with def or similar anchor
+  return match(line, s:GET_IN_SYNC_PATTERN) == -1 || foldLevel > 1
+endfunction "}}}
+
+fun! s:ElixirFoldProcessLine( lineNum, initialFoldLevel ) "{{{
   let line = getline( a:lineNum )
 
+  if empty(line)
+    return s:elixirFoldUnknownLevel()
+  endif
+
+  let lineStart = matchlist(line, s:LINE_PARSE)
+
+  if empty(lineStart)
+    return s:elixirFoldUnknownLevel()
+  endif
+
+  let offsetWidth = strlen(lineStart[1])
+  let strPrefix = lineStart[2]
+
   " Beginning of comment
-  if line =~ '^\s*#'
-    let matchGroup = s:ElixirGetSyntaxType(a:lineNum, 1)
-    if matchGroup == 'elixirBlock' || matchGroup == 'elixirGuard' || matchGroup == 'elixirAnonymousFunction' || matchGroup == 'elixirElseBlock'
-      return -1
+"  if strPrefix == "#"
+"    let matchGroup = s:ElixirGetSyntaxType(a:lineNum, 1)
+"    if matchGroup == 'elixirBlock' || matchGroup == 'elixirGuard' || matchGroup == 'elixirAnonymousFunction' || matchGroup == 'elixirElseBlock'
+"      return -1
+"    else
+"      return 0
+"    endif
+"  endif
+
+"  let specMatchCol = match(line, s:SPEC_KW_PATTERN)
+"  if specMatchCol > -1
+"    let prevNum = a:lineNum - 1
+"    let prevLine = getline(prevNum)
+"    let specMatchColPrev = match(prevLine, s:SPEC_KW_PATTERN)
+"    if specMatchColPrev == specMatchCol
+"      return -1
+"    endif
+"
+"    return '>' . (specMatchCol / sw_tab)
+"  endif
+
+  if strPrefix =~ '^defp\?\>'
+    let oneLinerMatch = matchlist(line, s:DEF_ONE_LINER_PATTERN)
+
+    let defMatch = matchlist(line, s:DEF_PATTERN)
+    if len(defMatch) < 2
+      let defName = 'nonexistent'
     else
+      let defName = defMatch[1]
+    endif
+
+    let multiLinerMatch = matchlist(line, s:DEF_MULTI_LINE_PATTERN)
+    if empty(multiLinerMatch)
+      let oneLinerMatch = [1]
+    end
+
+    if empty(oneLinerMatch)
+      " fun def with do/end block
+      call add(b:elixirStatus, [a:lineNum, offsetWidth, strPrefix, defName])
+
+      let foldTogether = b:elixirLastContext['name'] == defName
+      let foldTogether = foldTogether && match(defName, s:FOLD_TOGETHER_EXCEPTIONS) == -1
+
+      if foldTogether
+        return (a:initialFoldLevel + len(b:elixirStatus))
+      else
+        return '>' . (a:initialFoldLevel + len(b:elixirStatus))
+      endif
+    else
+      "        echom "one-liner or default definition " . defName
+      " fun def one-liner
+      let nextDef = s:PatternLookForward(a:lineNum + 1, s:DEF_PATTERN, s:MAX_LOOK_AHEAD)
+
+      "        echom "joined nextDef only " . join(nextDef)
+      "        echom "joined nextDef " . join(nextDef) . " lastName " . defName
+
+      if !empty(nextDef) && nextDef[1] == defName
+        let b:elixirLastContext['name'] = defName
+        return (a:initialFoldLevel + len(b:elixirStatus) + 1)
+      else
+        return '<' . (a:initialFoldLevel + len(b:elixirStatus) + 1)
+      endif
+    endif
+  endif
+
+  if strPrefix =~ '^\%(test\|describe\)\>'
+    let defName = "ignore test names"
+    call add(b:elixirStatus, [a:lineNum, offsetWidth, strPrefix, defName])
+    return '>' . (a:initialFoldLevel + len(b:elixirStatus))
+  endif
+
+  if strPrefix == 'end'
+    " check last b:elixirStatus element
+
+    if empty(b:elixirStatus)
       return 0
     endif
-  endif
 
-  let sw_tab = &tabstop
+    " TODO: b:elixirStatus may be empty!!!! (`end` comes before any `def(p)` are
+    " seen)
+    let [lastLineNum, lastOffset, lastPrefix, lastName] = b:elixirStatus[-1]
 
-  let specMatchCol = match(line, s:SPEC_KW_PATTERN)
-  if specMatchCol > -1
-    let prevNum = a:lineNum - 1
-    let prevLine = getline(prevNum)
-    let specMatchColPrev = match(prevLine, s:SPEC_KW_PATTERN)
-    if specMatchColPrev == specMatchCol
-      return -1
-    endif
+    " for speed considerations we accept as fold only def(p) and end on the
+    " same indent level
+    if lastOffset == offsetWidth
+      unlet b:elixirStatus[-1]
 
-    return '>' . (specMatchCol / sw_tab)
-  endif
+      let nextDef = s:PatternLookForward(a:lineNum + 1, s:DEF_PATTERN, s:MAX_LOOK_AHEAD)
 
-  "let defMatchCol = matchlist(line, s:DEF_PATTERN)
-  let defMatchCol = match(line, s:DEF_KW_PATTERN)
+      let b:elixirLastContext['name'] = lastName
+      "        echom "joined nextDef only " . join(nextDef)
+      "        echom "joined nextDef " . join(nextDef) . " lastName " . lastName
 
-  if defMatchCol > -1
-    " found a line with function def ZZZ
-    
-"    let match_position = match(line, s:DEF_KW_PATTERN)
-"    let sub_elem = [a:lineNum, match_position, defMatchCol[1]]
-"
-"    call add(s:def_positions, sub_elem)
+      let foldTogether = !empty(nextDef) && nextDef[1] == lastName
+      let foldTogether = foldTogether && match(lastName, s:FOLD_TOGETHER_EXCEPTIONS) == -1
 
-    let prevNum = a:lineNum - 1
-    let prevLine = getline(prevNum)
-    let end_match_position = match(prevLine, s:END_PATTERN)
-    if end_match_position == defMatchCol
-      return -1
-    endif
-
-    let specMatchCol = match(prevLine, s:SPEC_KW_PATTERN)
-    if specMatchCol == defMatchCol
-      return -1
-    endif
-
-    let matchGroup = s:ElixirGetSyntaxType(a:lineNum, defMatchCol+1)
-
-    if matchGroup == 'elixirDefine' || matchGroup == 'elixirModuleDefine'
-          \ || matchGroup == 'elixirPrivateDefine'
-      return '>' . (defMatchCol / sw_tab)
-    endif
-  endif
-
-
-  let defMatchCol = match(line, s:END_PATTERN)
-
-  if defMatchCol > -1
-    " skip next comment lines and see if we have defp as next statement
-    let nextLineNum = a:lineNum + 1
-    let nextLine = getline(nextLineNum)
-    while nextLine =~ '^\s*#'
-      let nextLineNum = nextLineNum + 1
-      let nextLine = getline(nextLineNum)
-    endwhile
-
-    let defp_match_position = match(nextLine, s:DEF_PATTERN)
-    if defp_match_position == defMatchCol
+      if foldTogether
+        return (a:initialFoldLevel + len(b:elixirStatus) + 1)
+      else
+        return '<' . (a:initialFoldLevel + len(b:elixirStatus) + 1)
+      endif
+    else
       return '='
     endif
-
-    let prevNum = a:lineNum - 1
-    let prevLine = getline(prevNum)
-    let defp_match_position = match(prevLine, s:DEF_PATTERN)
-    while prevNum > 0 && (defp_match_position == -1 || defp_match_position > defMatchCol)
-      let prevNum = prevNum - 1
-      let prevLine = getline(prevNum)
-      let defp_match_position = match(prevLine, s:DEF_PATTERN)
-    endwhile
-
-    if defp_match_position == defMatchCol
-      return '<' . (defMatchCol / sw_tab)
-    else
-      return -1
-    endif
   endif
-
   return '='
+endfunction "}}}
+
+fun! s:PatternLookForward(lineNum, pattern, maxCheck) "{{{
+  let i = 0
+  let maxLine = line('$')
+  while i < a:maxCheck
+    if a:lineNum + i > maxLine
+      break
+    endif
+
+    let line = getline(a:lineNum + i)
+    let lineMatch = matchlist(line, a:pattern)
+
+    if !empty(lineMatch)
+      return lineMatch
+    end
+
+    let i = i + 1
+  endwhile
+  return 0
 endfunction "}}}
 
 " This function skim over function definitions
@@ -154,27 +287,28 @@ fun! ElixirFoldText() "{{{
     let retVal = ''
     let began = 0
 
-"    let commentOnlyLine = '^\s*--.*$'
-"    let monoLineComment = '\s*--.*$'
-"    let nonEmptyLine    = '^\s\+\S'
-"    let emptyLine       = '^\s*$'
-"    let multilineCommentBegin = '^\s*{-'
-"    let multilineCommentEnd = '-}'
-
     let isMultiLine = 0
 
     let line = getline(i)
 
-    if line =~ '^\s*@spec'
+    if line =~ '^\s*@spec\>'
       let fun_head = substitute(line, "^\\s*@spec\\s*", "", "")
 
       let retVal = fun_head . ' '
-    else
-      "let fun_head = substitute(line, "do\s*\%(#.*\)\?$", "", "")
-      let fun_head = substitute(line, "do\\s*\\%(#.*\\)\\?$", "", "")
+    elseif line =~ '^\s*\%(test\|describe\)\>'
+      let fun_head = line
+      let fun_head = substitute(fun_head, "do\\s*\\%(#.*\\)\\?$", "", "")
       let fun_head = substitute(fun_head, "^\\s*", "", "")
 
+      let retVal = fun_head . ' '
+    else
+      " function heads
+      let fun_head = line
       let start_match_position = match(fun_head, s:DEF_PATTERN)
+
+      let fun_head = substitute(fun_head, "do\\s*\\%(#.*\\)\\?$", "", "")
+      let fun_head = substitute(fun_head, "^\\s*", "", "")
+
       let clauses = 0
 
       while i < v:foldend
@@ -182,15 +316,16 @@ fun! ElixirFoldText() "{{{
         let line = getline(i)
 
         let more_match_position = match(line, s:DEF_PATTERN)
+
         if more_match_position == start_match_position
           let clauses = clauses + 1
         end
       endwhile
 
       if clauses == 1
-        let retVal = fun_head . " +" . clauses . " clause"
+        let retVal = fun_head . " " . s:POWERLINE_SPACE_SYMBOL . " +" . clauses . " clause "
       elseif clauses > 1
-        let retVal = fun_head . " +" . clauses . " clauses"
+        let retVal = fun_head . " " . s:POWERLINE_SPACE_SYMBOL . " +" . clauses . " clauses "
       else
         let retVal = fun_head
       endif
@@ -199,49 +334,12 @@ fun! ElixirFoldText() "{{{
 
     let retVal = v:folddashes . " " . printf("% 3d", (v:foldend - v:foldstart)) . " " . retVal
 
-"    while i <= v:foldend
-"
-"        if isMultiLine
-"            if line =~ multilineCommentEnd
-"                let isMultiLine = 0
-"                let line = substitute(line, '.*-}', '', '')
-"
-"                if line =~ emptyLine
-"                    let i = i + 1
-"                    let line = getline(i)
-"                end
-"            else
-"                let i = i + 1
-"                let line = getline(i)
-"            end
-"        else
-"            if line =~ multilineCommentBegin
-"                let isMultiLine = 1
-"                continue
-"            elseif began == 0 && !(line =~ commentOnlyLine)
-"                let retVal = substitute(line, monoLineComment, ' ','')
-"                let began = 1
-"            elseif began != 0 && line =~ nonEmptyLine
-"                let tempVal = substitute( line, '\s\+\(.*\)$', ' \1', '' )
-"                let retVal = retVal . substitute(tempVal, '\s\+--.*', ' ','')
-"            elseif began != 0
-"                break
-"            endif
-"
-"            let i = i + 1
-"            let line = getline(i)
-"        endif
-"    endwhile
-
-"    if retVal == ''
-"        " We didn't found any meaningfull text
-"        return foldtext()
-"    endif
-
     return retVal
 endfunction "}}}
 
 fun! s:setElixirFolding() "{{{
+    call s:ResetPositionCache()
+
     setlocal foldexpr=ElixirFold(v:lnum)
     setlocal foldtext=ElixirFoldText()
     setlocal foldmethod=expr
