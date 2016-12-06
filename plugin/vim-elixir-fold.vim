@@ -15,8 +15,6 @@ if exists("g:__ELIXIRFOLD_VIM__")
 endif
 let g:__ELIXIRFOLD_VIM__ = 1
 
-set debug=msg
-
 " Top level bigdefs
 fun! s:ElixirFoldMaster( line ) "{{{
     return a:line =~# '^\s*defp\?'
@@ -37,6 +35,7 @@ endfunction "}}}
 let s:DEF_PATTERN = '\%(^\s*\)\@<=defp\?\%(:\)\@!\s\+\([^[:space:];#<,()\[\]]\+\)'
 let s:DEF_KW_PATTERN = '\%(^\s*\)\@<=defp\?'
 let s:END_PATTERN = '\v(^\s*)@<=end'
+let s:SPEC_KW_PATTERN = '\%(^\s*\)\@<=@spec'
 
 function! s:ElixirGetSyntaxType(line, col)
   if a:col == -1 " skip synID lookup for not found match
@@ -64,10 +63,22 @@ fun! ElixirFold( lineNum ) "{{{
     endif
   endif
 
+  let sw_tab = &tabstop
+
+  let specMatchCol = match(line, s:SPEC_KW_PATTERN)
+  if specMatchCol > -1
+    let prevNum = a:lineNum - 1
+    let prevLine = getline(prevNum)
+    let specMatchColPrev = match(prevLine, s:SPEC_KW_PATTERN)
+    if specMatchColPrev == specMatchCol
+      return -1
+    endif
+
+    return '>' . (specMatchCol / sw_tab)
+  endif
+
   "let defMatchCol = matchlist(line, s:DEF_PATTERN)
   let defMatchCol = match(line, s:DEF_KW_PATTERN)
-
-  let sw_tab = &tabstop
 
   if defMatchCol > -1
     " found a line with function def ZZZ
@@ -84,6 +95,11 @@ fun! ElixirFold( lineNum ) "{{{
       return -1
     endif
 
+    let specMatchCol = match(prevLine, s:SPEC_KW_PATTERN)
+    if specMatchCol == defMatchCol
+      return -1
+    endif
+
     let matchGroup = s:ElixirGetSyntaxType(a:lineNum, defMatchCol+1)
 
     if matchGroup == 'elixirDefine' || matchGroup == 'elixirModuleDefine'
@@ -91,6 +107,7 @@ fun! ElixirFold( lineNum ) "{{{
       return '>' . (defMatchCol / sw_tab)
     endif
   endif
+
 
   let defMatchCol = match(line, s:END_PATTERN)
 
@@ -148,30 +165,39 @@ fun! ElixirFoldText() "{{{
 
     let line = getline(i)
 
-    let fun_head = substitute(line, "do\s*$", "", "")
+    if line =~ '^\s*@spec'
+      let fun_head = substitute(line, "^\\s*@spec\\s*", "", "")
 
-    let start_match_position = match(fun_head, s:DEF_PATTERN)
-    let clauses = 0
-
-    while i < v:foldend
-      let i = i + 1
-      let line = getline(i)
-
-      let more_match_position = match(line, s:DEF_PATTERN)
-      if more_match_position == start_match_position
-        let clauses = clauses + 1
-      end
-    endwhile
-
-    if clauses == 1
-      let retVal = fun_head . " +" . clauses . " clause"
-    elseif clauses > 1
-      let retVal = fun_head . " +" . clauses . " clauses"
+      let retVal = fun_head . ' '
     else
-      let retVal = fun_head
+      "let fun_head = substitute(line, "do\s*\%(#.*\)\?$", "", "")
+      let fun_head = substitute(line, "do\\s*\\%(#.*\\)\\?$", "", "")
+      let fun_head = substitute(fun_head, "^\\s*", "", "")
+
+      let start_match_position = match(fun_head, s:DEF_PATTERN)
+      let clauses = 0
+
+      while i < v:foldend
+        let i = i + 1
+        let line = getline(i)
+
+        let more_match_position = match(line, s:DEF_PATTERN)
+        if more_match_position == start_match_position
+          let clauses = clauses + 1
+        end
+      endwhile
+
+      if clauses == 1
+        let retVal = fun_head . " +" . clauses . " clause"
+      elseif clauses > 1
+        let retVal = fun_head . " +" . clauses . " clauses"
+      else
+        let retVal = fun_head
+      endif
+
     endif
 
-    let retVal = v:folddashes . retVal
+    let retVal = v:folddashes . " " . printf("% 3d", (v:foldend - v:foldstart)) . " " . retVal
 
 "    while i <= v:foldend
 "
@@ -219,7 +245,7 @@ fun! s:setElixirFolding() "{{{
     setlocal foldexpr=ElixirFold(v:lnum)
     setlocal foldtext=ElixirFoldText()
     setlocal foldmethod=expr
-    setlocal foldcolumn=7
+    setlocal foldcolumn=2
 endfunction "}}}
 
 augroup ElixirFold
