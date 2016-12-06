@@ -245,7 +245,7 @@ fun! s:setElixirFolding() "{{{
     setlocal foldexpr=ElixirFold(v:lnum)
     setlocal foldtext=ElixirFoldText()
     setlocal foldmethod=expr
-    setlocal foldcolumn=2
+    setlocal foldcolumn=0
 endfunction "}}}
 
 augroup ElixirFold
