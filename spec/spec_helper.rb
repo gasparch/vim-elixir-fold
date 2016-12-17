@@ -83,6 +83,7 @@ class Buffer
   def edit_file(content)
     File.write(@file, content) if content
 
+    @vim.normal ':set ts=2<CR>'
     @vim.edit @file
     @vim.normal ':set ft=elixir<CR>'
   end

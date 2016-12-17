@@ -13,19 +13,37 @@ if exists("g:__ELIXIRFOLD_VIM__")
 endif
 let g:__ELIXIRFOLD_VIM__ = 1
 
+" this plugin heavily relies on correct tabstop setting set in elixir file
+" if file is edited on different systems with different tabsettings,
+" it may not work properly
+
 "set debug=msg,throw
 let s:__DEBUG = 0
 
 let s:FOLD_TOGETHER_EXCEPTIONS = 'handle_\%(call\|cast\|info\)'
 
-let s:DEF_PATTERN = '\%(^\s*\)\@<=defp\?\%(:\)\@!\s\+\([^[:space:];#<,()\[\]]\+\)'
+let s:DEF_PATTERN = '\%(^\s*\)\@<=\(def\%(p\|macro\)\?\%(:\)\@!\s\+[^[:space:];#<,()\[\]]\+\)'
 let s:SPEC_KW_PATTERN = '\%(^\s*\)\@<=@spec'
-let s:DEF_ONE_LINER_PATTERN = '\%(^\s*\)\@<=defp\?\%(:\)\@!\s\+\([^[:space:];#<,()\[\]]\+\)\%(.*\),\s*do:\s\+'
-let s:DEF_MULTI_LINE_PATTERN = '\%(^\s*\)\@<=defp\?\%(:\)\@!\s\+\([^[:space:];#<,()\[\]]\+\)\s*\%(([^)]*).*\)\?\<do\>\s*\%(#.*\)\?$'
 
-let s:LINE_PARSE = '\v^(\s*)(#|\w+)'
+let s:DEF_MULTILINE_ARGS = 1
+let s:DEF_MULTILINE_DO = 2
+let s:DEF_SINGLELINE_DO = 3
 
-let s:GET_IN_SYNC_PATTERN = '^\s*\%(test\|describe\|defp\?\)\>'
+let s:NONEXISTENT_NAME = "..--nonexistent--.."
+
+" RE to match def on single line (see file testre.vim)
+" if this RE matches - it is either one liner or mulriliner
+" but def arguments list and do statement are on a single line
+"
+" see tests for better understanding what we can indent
+"                                                                                           |-- multiline do ------------|
+"                                                                                                           |--when-----|
+let s:DEF_ON_ONE_LINE = '\%(^\s*\)\@<=def\%(p\|macro\)\?\%(:\)\@!\s\+\([^[:space:];#<,()\[\]]\+\)\s*\%(\%(\%(([^)]*)\s*\%(\<when\>.*\)\?\)\?\(\%(\<do\>.*\)\)\)\|\%(\%(([^)]*)\s*\%(\<when\>.*\)\?\)\?\s*,\s*\(\<do\>:.*\)\)\|\(([^)]*)\s*\)\)$'
+"                          ^space    defp  no:after      ^__func_name______________^        ^args braces
+
+let s:LINE_PARSE = '\v^(\s*)(#|do:|\w+)'
+
+let s:GET_IN_SYNC_PATTERN = '^\s*\%(test\|describe\|def\%(p\|macro\)\?\)\>'
 
 let s:NON_INITIALIZED = -65536
 let s:MAX_LOOK_AHEAD = 50
@@ -113,7 +131,7 @@ endfunction "}}}
 
 fun! s:elixirFoldUnknownLevel() "{{{
   if !empty(b:elixirStatus)
-    " we do not want to decide which level we are, 
+    " we do not want to decide which level we are,
     " but we want to keep current level
     return '='
   else
@@ -126,7 +144,7 @@ fun! s:elixirNeedMoreBacktrack(lineNum) "{{{
   let foldLevel = foldlevel(a:lineNum)
   let line = getline(a:lineNum)
 
-"  echom "backtrack decision " . a:lineNum . " re=" . (match(line, s:GET_IN_SYNC_PATTERN)) . " flvl=" . (foldLevel) . " -> " . line 
+"  echom "backtrack decision " . a:lineNum . " re=" . (match(line, s:GET_IN_SYNC_PATTERN)) . " flvl=" . (foldLevel) . " -> " . line
 
   " backtrack until we find line with def or similar anchor
   return match(line, s:GET_IN_SYNC_PATTERN) == -1 || foldLevel > 1
@@ -170,22 +188,34 @@ fun! s:ElixirFoldProcessLine( lineNum, initialFoldLevel ) "{{{
 "    return '>' . (specMatchCol / sw_tab)
 "  endif
 
-  if strPrefix =~ '^defp\?\>'
-    let oneLinerMatch = matchlist(line, s:DEF_ONE_LINER_PATTERN)
-
+  if strPrefix =~ '^def\%(p\|macro\)\?\>'
     let defMatch = matchlist(line, s:DEF_PATTERN)
     if len(defMatch) < 2
-      let defName = 'nonexistent'
+      let defName = s:NONEXISTENT_NAME
     else
       let defName = defMatch[1]
     endif
 
-    let multiLinerMatch = matchlist(line, s:DEF_MULTI_LINE_PATTERN)
-    if empty(multiLinerMatch)
-      let oneLinerMatch = [1]
-    end
+    let prefixMatch = matchlist(line, s:DEF_ON_ONE_LINE)
+    let mode = -1
+    if empty(prefixMatch) && defName != s:NONEXISTENT_NAME
+      let mode = s:DEF_MULTILINE_ARGS
+    else
+      call filter(prefixMatch, 'v:val =~ "^\\(do\\|(\\)"')
+      if empty(prefixMatch)
+        let mode = s:DEF_SINGLELINE_DO
+      endif
 
-    if empty(oneLinerMatch)
+      if prefixMatch[0] =~ '^('
+        let mode = s:DEF_SINGLELINE_DO
+      elseif prefixMatch[0] =~ '^do:'
+        let mode = s:DEF_SINGLELINE_DO
+      else
+        let mode = s:DEF_MULTILINE_DO
+      endif
+    endif
+
+    if (mode == s:DEF_MULTILINE_ARGS) || (mode == s:DEF_MULTILINE_DO)
       " fun def with do/end block
       call add(b:elixirStatus, [a:lineNum, offsetWidth, strPrefix, defName])
 
@@ -202,8 +232,8 @@ fun! s:ElixirFoldProcessLine( lineNum, initialFoldLevel ) "{{{
       " fun def one-liner
       let nextDef = s:PatternLookForward(a:lineNum + 1, s:DEF_PATTERN, s:MAX_LOOK_AHEAD)
 
-      "        echom "joined nextDef only " . join(nextDef)
-      "        echom "joined nextDef " . join(nextDef) . " lastName " . defName
+      " echom "joined nextDef only " . join(nextDef)
+      " echom "joined nextDef " . join(nextDef) . " lastName " . defName
 
       if !empty(nextDef) && nextDef[1] == defName
         let b:elixirLastContext['name'] = defName
@@ -220,7 +250,9 @@ fun! s:ElixirFoldProcessLine( lineNum, initialFoldLevel ) "{{{
     return '>' . (a:initialFoldLevel + len(b:elixirStatus))
   endif
 
-  if strPrefix == 'end'
+  let isEnd = strPrefix == 'end'
+  let isOneLineDo = strPrefix =~ "^do:"
+  if isEnd || isOneLineDo
     " check last b:elixirStatus element
 
     if empty(b:elixirStatus)
@@ -233,7 +265,7 @@ fun! s:ElixirFoldProcessLine( lineNum, initialFoldLevel ) "{{{
 
     " for speed considerations we accept as fold only def(p) and end on the
     " same indent level
-    if lastOffset == offsetWidth
+    if (isEnd && lastOffset == offsetWidth) || (isOneLineDo && lastOffset + &tabstop == offsetWidth)
       unlet b:elixirStatus[-1]
 
       let nextDef = s:PatternLookForward(a:lineNum + 1, s:DEF_PATTERN, s:MAX_LOOK_AHEAD)
@@ -277,11 +309,6 @@ fun! s:PatternLookForward(lineNum, pattern, maxCheck) "{{{
   return 0
 endfunction "}}}
 
-" This function skim over function definitions
-" skiping comments line :
-" -- ....
-" and merging lines without first non space element, to
-" catch the full type expression.
 fun! ElixirFoldText() "{{{
     let i = v:foldstart
     let retVal = ''

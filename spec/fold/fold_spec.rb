@@ -390,9 +390,110 @@ describe 'folding simple functions' do
     EOF
   end
 
+  it "fold function w/multiline header" do
+    expect(<<~EOF).to be_elixir_fold
+0   defmodule Test do
+1     defp check_operators([
+1       {token, line, _, _, _},
+1       {:identifier, line, _, _, _},
+1       {:mult_op, line, _, _, :/}
+1       | rest], rule, acc)
+1     when token == :capture_op or token == :. do
+1       check_operators(rest, rule, acc)
+1     end
+0   end
+    EOF
+  end
+
+  it "fold macros exactly as functions" do
+    expect(<<~EOF).to be_elixir_fold
+0   defmodule Test do
+1     defmacro __using__(_opts) do
+1       quote do
+1         import  Amnesia, only: [defdatabase: 2]
+1         require Amnesia
+1         require Amnesia.Fragment
+1         require Amnesia.Helper
+1       end
+1     end
+0   end
+    EOF
+  end
+
+  it "do not fold macros w/same name function" do
+    expect(<<~EOF).to be_elixir_fold
+0   defmodule Test do
+1     defmacro transaction(_opts) do
+1       :macro_body
+1     end
+0
+1     def transaction(_opts) do
+1       true
+1     end
+0   end
+    EOF
+  end
+
+  it "do not fold def/deps w/same name together" do
+    expect(<<~EOF).to be_elixir_fold
+0   defmodule Test do
+1     def transaction(1) do
+1       :macro_body1
+1     end
+1
+1     def transaction(2) do
+1       :macro_body2
+1     end
+0
+1     defp transaction(_opts) do
+1       true
+1     end
+0   end
+    EOF
+  end
+
+  it "correctly fold def/do: on separate lines" do
+    expect(<<~EOF).to be_elixir_fold
+0   defmodule Test do
+1     def some_function([]),
+1       do: :empty
+0
+1     def some_function2(_),
+1       do: :very_long_line_here
+1
+1     def some_function2(_) do
+1       :another_line
+1     end
+0   end
+    EOF
+  end
+
+  it "folding do: on multiple lines SHOULD FAIL, use do/end block instead" do
+    expect(<<~EOF).to be_elixir_fold
+0   defmodule Test do
+1     def some_function(),
+1       do: 1 +
+0           2
+0   end
+    EOF
+  end
+
+  it "correctly fold def/for/do: ignore do: because of wrong indent level" do
+    expect(<<~EOF).to be_elixir_fold
+0   defmodule Test do
+1     def some_function([]) do
+1       for i <- [1,2,3],
+1         do: :empty
+1     end
+0   end
+    EOF
+  end
+end
 
 
 
+
+describe 'editing functions' do
 
   ########################################################################
   # editing folds
@@ -604,7 +705,6 @@ describe 'folding simple functions' do
     end
     EOF
   end
-
 
 
 
